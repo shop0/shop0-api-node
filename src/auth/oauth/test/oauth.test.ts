@@ -1,0 +1,441 @@
+import "../../../test/test_helper";
+
+import querystring from "querystring";
+import http from "http";
+
+import jwt from "jsonwebtoken";
+import Cookies from "cookies";
+
+import { shop0OAuth } from "../oauth";
+import { Context } from "../../../context";
+import * as shop0Errors from "../../../error";
+import { AuthQuery } from "../types";
+import { generateLocalHmac } from "../../../utils/hmac-validator";
+import { JwtPayload } from "../../../utils/decode-session-token";
+import loadCurrentSession from "../../../utils/load-current-session";
+import { CustomSessionStorage, Session } from "../../session";
+
+jest.mock("cookies");
+
+let shop: string;
+
+beforeEach(() => {
+  shop = "someshop.myshop0.io";
+  (Cookies as any).mockClear();
+});
+
+describe("beginAuth", () => {
+  let cookies = {
+    id: "",
+  };
+  let req: http.IncomingMessage;
+  let res: http.ServerResponse;
+
+  beforeEach(() => {
+    cookies = {
+      id: "",
+    };
+
+    req = {} as http.IncomingMessage;
+    res = {} as http.ServerResponse;
+
+    Cookies.prototype.set.mockImplementation(
+      (cookieName: string, cookieValue: string) => {
+        expect(cookieName).toBe("shop0_app_session");
+        cookies.id = cookieValue;
+      }
+    );
+  });
+
+  test("throws Context error when not properly initialized", async () => {
+    Context.API_KEY = "";
+
+    await expect(
+      shop0OAuth.beginAuth(req, res, shop, "/some-callback")
+    ).rejects.toThrow(shop0Errors.UninitializedContextError);
+  });
+
+  test("throws SessionStorageErrors when storeSession returns false", async () => {
+    const storage = new CustomSessionStorage(
+      () => Promise.resolve(false),
+      () => Promise.resolve(new Session(shop)),
+      () => Promise.resolve(true)
+    );
+    Context.SESSION_STORAGE = storage;
+
+    await expect(
+      shop0OAuth.beginAuth(req, res, shop, "some-callback")
+    ).rejects.toThrow(shop0Errors.SessionStorageError);
+  });
+
+  test("creates and stores a new session for the specified shop", async () => {
+    const authRoute = await shop0OAuth.beginAuth(
+      req,
+      res,
+      shop,
+      "/some-callback"
+    );
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+
+    expect(Cookies).toHaveBeenCalledTimes(1);
+    expect(Cookies.prototype.set).toHaveBeenCalledTimes(1);
+    expect(authRoute).toBeDefined();
+    expect(session).toBeDefined();
+    expect(session).toHaveProperty("id");
+    expect(session).toHaveProperty("shop", shop);
+    expect(session).toHaveProperty("state");
+    expect(session).toHaveProperty("expires", undefined);
+  });
+
+  test('sets session id and cookie to shop name with "_offline" for offline access requests', async () => {
+    await shop0OAuth.beginAuth(req, res, shop, "/some-callback");
+
+    expect(cookies.id).toBe(`offline_${shop}`);
+  });
+
+  test("returns the correct auth url for given info", async () => {
+    const authRoute = await shop0OAuth.beginAuth(
+      req,
+      res,
+      shop,
+      "/some-callback"
+    );
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const query = {
+      client_id: Context.API_KEY,
+      scope: Context.SCOPES.toString(),
+      redirect_uri: `https://${Context.HOST_NAME}/some-callback`,
+      state: session ? session.state : "",
+      "grant_options[]": "",
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    const expectedQueryString = querystring.stringify(query);
+
+    expect(authRoute).toBe(
+      `https://${shop}/admin/oauth/authorize?${expectedQueryString}`
+    );
+  });
+
+  test("appends per_user access mode to url when isOnline is set to true", async () => {
+    const authRoute = await shop0OAuth.beginAuth(
+      req,
+      res,
+      shop,
+      "/some-callback",
+      true
+    );
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const query = {
+      client_id: Context.API_KEY,
+      scope: Context.SCOPES.toString(),
+      redirect_uri: `https://${Context.HOST_NAME}/some-callback`,
+      state: session ? session.state : "",
+      "grant_options[]": "per-user",
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+    const expectedQueryString = querystring.stringify(query);
+
+    expect(authRoute).toBe(
+      `https://${shop}/admin/oauth/authorize?${expectedQueryString}`
+    );
+  });
+
+  test("fails to start if the app is private", () => {
+    Context.IS_PRIVATE_APP = true;
+    Context.initialize(Context);
+
+    expect(
+      shop0OAuth.beginAuth(req, res, shop, "/some-callback", true)
+    ).rejects.toThrow(shop0Errors.PrivateAppError);
+  });
+});
+
+describe("validateAuthCallback", () => {
+  let cookies = {
+    id: "",
+  };
+  let req: http.IncomingMessage;
+  let res: http.ServerResponse;
+
+  beforeEach(() => {
+    cookies = {
+      id: "",
+    };
+
+    req = {} as http.IncomingMessage;
+    res = {} as http.ServerResponse;
+
+    Cookies.prototype.set.mockImplementation(
+      (cookieName: string, cookieValue: string) => {
+        expect(cookieName).toBe("shop0_app_session");
+        cookies.id = cookieValue;
+      }
+    );
+
+    Cookies.prototype.get.mockImplementation(() => cookies.id);
+  });
+
+  test("throws Context error when not properly initialized", async () => {
+    Context.API_KEY = "";
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+    const testCallbackQuery: AuthQuery = {
+      shop,
+      state: session ? session.state : "",
+      timestamp: Number(new Date()).toString(),
+      code: "some random auth code",
+    };
+    const expectedHmac = generateLocalHmac(testCallbackQuery);
+    testCallbackQuery.hmac = expectedHmac;
+
+    await expect(
+      shop0OAuth.validateAuthCallback(req, res, testCallbackQuery)
+    ).rejects.toThrow(shop0Errors.UninitializedContextError);
+  });
+
+  test("throws an error when receiving a callback for a shop that doesn't have a session cookie", async () => {
+    await expect(
+      shop0OAuth.validateAuthCallback(req, res, {
+        shop: "I do not exist",
+      } as AuthQuery)
+    ).rejects.toThrow(shop0Errors.CookieNotFound);
+  });
+
+  test("throws an error when receiving a callback for a shop with no saved session", async () => {
+    await shop0OAuth.beginAuth(req, res, "invalidurl.com", "/some-callback");
+
+    await Context.SESSION_STORAGE.deleteSession(cookies.id);
+
+    await expect(
+      shop0OAuth.validateAuthCallback(req, res, {
+        shop: "I do not exist",
+      } as AuthQuery)
+    ).rejects.toThrow(shop0Errors.SessionNotFound);
+  });
+
+  test("throws error when callback includes invalid hmac, or state", async () => {
+    await shop0OAuth.beginAuth(req, res, "invalidurl.com", "/some-callback");
+    const testCallbackQuery: AuthQuery = {
+      shop: "invalidurl.com",
+      state: "incorrect",
+      timestamp: Number(new Date()).toString(),
+      code: "some random auth code",
+    };
+    testCallbackQuery.hmac = "definitely the wrong hmac";
+
+    await expect(
+      shop0OAuth.validateAuthCallback(req, res, testCallbackQuery)
+    ).rejects.toThrow(shop0Errors.InvalidOAuthError);
+  });
+
+  test("throws a SessionStorageError when storeSession returns false", async () => {
+    await shop0OAuth.beginAuth(req, res, shop, "/some-callback");
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+
+    const testCallbackQuery: AuthQuery = {
+      shop,
+      state: session ? session.state : "",
+      timestamp: Number(new Date()).toString(),
+      code: "some random auth code",
+    };
+    const expectedHmac = generateLocalHmac(testCallbackQuery);
+    testCallbackQuery.hmac = expectedHmac;
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const successResponse = {
+      access_token: "some access token string",
+      scope: Context.SCOPES.toString(),
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    fetchMock.mockResponse(JSON.stringify(successResponse));
+
+    // create new storage with broken storeCallback for validateAuthCallback to use
+    /* eslint-disable-next-line require-atomic-updates */
+    Context.SESSION_STORAGE = new CustomSessionStorage(
+      () => Promise.resolve(false),
+      () => Promise.resolve(session),
+      () => Promise.resolve(true)
+    );
+
+    await expect(
+      shop0OAuth.validateAuthCallback(req, res, testCallbackQuery)
+    ).rejects.toThrow(shop0Errors.SessionStorageError);
+  });
+
+  test("requests access token for valid callbacks with offline access and updates session", async () => {
+    await shop0OAuth.beginAuth(req, res, shop, "/some-callback");
+    let session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+    const testCallbackQuery: AuthQuery = {
+      shop,
+      state: session ? session.state : "",
+      timestamp: Number(new Date()).toString(),
+      code: "some random auth code",
+    };
+    const expectedHmac = generateLocalHmac(testCallbackQuery);
+    testCallbackQuery.hmac = expectedHmac;
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const successResponse = {
+      access_token: "some access token string",
+      scope: Context.SCOPES.toString(),
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    fetchMock.mockResponse(JSON.stringify(successResponse));
+    await shop0OAuth.validateAuthCallback(req, res, testCallbackQuery);
+    session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+
+    expect(session?.accessToken).toBe(successResponse.access_token);
+  });
+
+  test("requests access token for valid callbacks with online access and updates session with expiration and onlineAccessInfo", async () => {
+    await shop0OAuth.beginAuth(req, res, shop, "/some-callback", true);
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+    const testCallbackQuery: AuthQuery = {
+      shop,
+      state: session ? session.state : "",
+      timestamp: Number(new Date()).toString(),
+      code: "some random auth code",
+    };
+    const expectedHmac = generateLocalHmac(testCallbackQuery);
+    testCallbackQuery.hmac = expectedHmac;
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const successResponse = {
+      access_token: "some access token",
+      scope: "pet_kitties, walk_dogs",
+      expires_in: "525600",
+      associated_user_scope: "pet_kitties",
+      associated_user: {
+        id: "8675309",
+        first_name: "John",
+        last_name: "Smith",
+        email: "john@example.com",
+        email_verified: true,
+        account_owner: true,
+        locale: "en",
+        collaborator: true,
+      },
+    };
+
+    const expectedOnlineAccessInfo = {
+      expires_in: successResponse.expires_in,
+      associated_user_scope: successResponse.associated_user_scope,
+      associated_user: successResponse.associated_user,
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+
+    fetchMock.mockResponse(JSON.stringify(successResponse));
+    await shop0OAuth.validateAuthCallback(req, res, testCallbackQuery);
+    expect(session?.accessToken).toBe(successResponse.access_token);
+    expect(session?.expires).toBeInstanceOf(Date);
+    expect(session?.onlineAccessInfo).toEqual(expectedOnlineAccessInfo);
+  });
+
+  test("converts an OAuth session into a JWT one if it is online", async () => {
+    Context.IS_EMBEDDED_APP = true;
+    Context.initialize(Context);
+
+    await shop0OAuth.beginAuth(req, res, shop, "/some-callback", true);
+    const session = await Context.SESSION_STORAGE.loadSession(cookies.id);
+
+    /* eslint-disable @typescript-eslint/naming-convention */
+    const successResponse = {
+      access_token: "some access token",
+      scope: "pet_kitties, walk_dogs",
+      expires_in: 525600,
+      associated_user_scope: "pet_kitties",
+      associated_user: {
+        id: "1",
+        first_name: "John",
+        last_name: "Smith",
+        email: "john@example.com",
+        email_verified: true,
+        account_owner: true,
+        locale: "en",
+        collaborator: true,
+      },
+    };
+    const testCallbackQuery: AuthQuery = {
+      shop,
+      state: session ? session.state : "",
+      timestamp: Number(new Date()).toString(),
+      code: "some random auth code",
+    };
+    /* eslint-enable @typescript-eslint/naming-convention */
+    const expectedHmac = generateLocalHmac(testCallbackQuery);
+    testCallbackQuery.hmac = expectedHmac;
+
+    fetchMock.mockResponse(JSON.stringify(successResponse));
+    await shop0OAuth.validateAuthCallback(req, res, testCallbackQuery);
+
+    let expectedCookieExpiration = Date.now() / 1000;
+    expectedCookieExpiration += 30;
+    const cookieSession = await Context.SESSION_STORAGE.loadSession(cookies.id);
+    expect(cookieSession).not.toBeUndefined();
+
+    if (cookieSession?.expires) {
+      const actualCookieExpiration: number =
+        cookieSession.expires.getTime() / 1000;
+      // 1-second grace period
+      expect(
+        Math.abs(expectedCookieExpiration - actualCookieExpiration)
+      ).toBeLessThan(1);
+    }
+
+    const jwtPayload: JwtPayload = {
+      iss: `https://${shop}/admin`,
+      dest: `https://${shop}`,
+      aud: Context.API_KEY,
+      sub: "1",
+      exp:
+        new Date(Date.now() + successResponse.expires_in * 1000).getTime() /
+        1000,
+      nbf: 1234,
+      iat: 1234,
+      jti: "4321",
+      sid: "abc123",
+    };
+
+    const jwtSessionId = `${shop}_${jwtPayload.sub}`;
+    const actualJwtSession = await Context.SESSION_STORAGE.loadSession(
+      jwtSessionId
+    );
+    expect(actualJwtSession).not.toBeUndefined();
+
+    const actualJwtExpiration = actualJwtSession?.expires
+      ? actualJwtSession.expires.getTime() / 1000
+      : 0;
+    // 1-second grace period
+    expect(Math.abs(actualJwtExpiration - jwtPayload.exp)).toBeLessThan(1);
+
+    // Simulate a subsequent JWT request to see if the session is loaded as the current one
+
+    const token = jwt.sign(jwtPayload, Context.API_SECRET_KEY, {
+      algorithm: "HS256",
+    });
+    const jwtReq = {
+      headers: {
+        authorization: `Bearer ${token}`,
+      },
+    } as http.IncomingMessage;
+    const jwtRes = {} as http.ServerResponse;
+
+    const currentSession = await loadCurrentSession(jwtReq, jwtRes);
+    expect(currentSession).not.toBe(null);
+    expect(currentSession?.id).toEqual(jwtSessionId);
+  });
+
+  test("fails to run if the app is private", () => {
+    Context.IS_PRIVATE_APP = true;
+    Context.initialize(Context);
+
+    expect(
+      shop0OAuth.validateAuthCallback(req, res, {} as AuthQuery)
+    ).rejects.toThrow(shop0Errors.PrivateAppError);
+  });
+});

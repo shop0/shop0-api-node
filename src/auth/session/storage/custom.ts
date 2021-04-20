@@ -1,0 +1,74 @@
+import { Session } from "../session";
+import { SessionStorage } from "../session_storage";
+import * as shop0Errors from "../../../error";
+
+export class CustomSessionStorage implements SessionStorage {
+  constructor(
+    readonly storeCallback: (session: Session) => Promise<boolean>,
+    readonly loadCallback: (
+      id: string
+    ) => Promise<Session | Record<string, unknown> | undefined>,
+    readonly deleteCallback: (id: string) => Promise<boolean>
+  ) {
+    this.storeCallback = storeCallback;
+    this.loadCallback = loadCallback;
+    this.deleteCallback = deleteCallback;
+  }
+
+  public async storeSession(session: Session): Promise<boolean> {
+    try {
+      return await this.storeCallback(session);
+    } catch (error) {
+      throw new shop0Errors.SessionStorageError(
+        `CustomSessionStorage failed to store a session. Error Details: ${error}`
+      );
+    }
+  }
+
+  public async loadSession(id: string): Promise<Session | undefined> {
+    let result: Session | Record<string, unknown> | undefined;
+    try {
+      result = await this.loadCallback(id);
+    } catch (error) {
+      throw new shop0Errors.SessionStorageError(
+        `CustomSessionStorage failed to load a session. Error Details: ${error}`
+      );
+    }
+    if (result) {
+      if (result instanceof Session) {
+        if (result.expires && typeof result.expires === "string") {
+          result.expires = new Date(result.expires);
+        }
+
+        return result;
+      } else if (result instanceof Object && "id" in result) {
+        let session = new Session(result.id as string);
+        session = { ...session, ...result };
+
+        if (session.expires && typeof session.expires === "string") {
+          session.expires = new Date(session.expires);
+        }
+
+        return session;
+      } else {
+        throw new shop0Errors.SessionStorageError(
+          `Expected return to be instanceof Session, but received instanceof ${
+            result!.constructor.name
+          }.`
+        );
+      }
+    } else {
+      return undefined;
+    }
+  }
+
+  public async deleteSession(id: string): Promise<boolean> {
+    try {
+      return await this.deleteCallback(id);
+    } catch (error) {
+      throw new shop0Errors.SessionStorageError(
+        `CustomSessionStorage failed to delete a session. Error Details: ${error}`
+      );
+    }
+  }
+}

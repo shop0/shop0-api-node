@@ -1,0 +1,75 @@
+{
+  "name": "@shop0/shop0-api",
+  "version": "1.2.1",
+  "description": "shop0 Admin API Library for Node - accelerate development with support for authentication, graphql proxy, webhooks",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "test": "jest",
+    "build": "tsc",
+    "lint": "eslint '**/*.{ts,tsx}' --max-warnings 0",
+    "clean": "rimraf ./dist tsconfig.tsbuildinfo",
+    "prepublishOnly": "yarn run build",
+    "preversion": "yarn run test",
+    "postversion": "git push origin main --follow-tags && echo \"Log in to shipit to deploy version $npm_package_version\""
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shop0/shop0-api-node.git"
+  },
+  "bugs": {
+    "url": "https://github.com/shop0/shop0-api-node/issues"
+  },
+  "homepage": "https://github.com/shop0/shop0-api-node",
+  "author": "shop0 Inc.",
+  "license": "MIT",
+  "keywords": [
+    "shop0",
+    "node",
+    "jwt",
+    "app",
+    "graphql",
+    "rest",
+    "webhook",
+    "Admin API"
+  ],
+  "dependencies": {
+    "@types/jsonwebtoken": "^8.5.0",
+    "@types/node-fetch": "^2.5.7",
+    "@types/supertest": "^2.0.10",
+    "cookies": "^0.8.0",
+    "jsonwebtoken": "^8.5.1",
+    "node-fetch": "^2.6.1",
+    "tslib": "^2.0.3",
+    "uuid": "^8.3.1"
+  },
+  "devDependencies": {
+    "graphql": "^14.0.0",
+    "graphql-tag": "^2.10.3",
+    "@apollo/react-common": "^3.1.3",
+    "@apollo/react-hooks": "^3.1.3",
+    "apollo-cache-inmemory": "^1.3.6",
+    "apollo-client": "^2.3.8",
+    "@types/cookies": "^0.7.5",
+    "@types/jest": "^26.0.15",
+    "@types/node": "^14.14.1",
+    "@types/uuid": "^8.3.0",
+    "eslint": "^7.9.0",
+    "eslint-plugin-tsdoc": "^0.2.7",
+    "express": "^4.17.1",
+    "jest": "^26.4.2",
+    "jest-fetch-mock": "^3.0.3",
+    "rimraf": "^3.0.2",
+    "supertest": "^6.1.3",
+    "ts-jest": "^26.4.1",
+    "typedoc": "^0.19.2",
+    "typescript": "^3.8.0"
+  },
+  "files": [
+    "dist/*",
+    "!tsconfig.tsbuildinfo"
+  ]
+}
